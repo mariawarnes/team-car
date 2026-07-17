@@ -1,0 +1,7 @@
+*.user
+*.suo
+bin/
+obj/
+dist/
+ScriptHookVDotNet*.dll
+ScriptHookVDotNet*.xml
