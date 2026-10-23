@@ -13,12 +13,16 @@ public sealed class TeamCar : Script
     private Vehicle _car;
     private Ped _driver;
     private Blip _blip;
+    private Prop _serviceProp;
     private Keys _toggleKey = Keys.F10;
+    private Keys _supportKey = Keys.E;
     private string _vehicleModel = "stratum";
     private string _driverModel = "s_m_m_autoshop_01";
     private string _plate = "TEAM CAR";
     private int _primaryColour = 3;
     private int _secondaryColour = 111;
+    private int _surfboardRoofExtra = 1;
+    private int _bicycleRoofExtra = 2;
     private float _followDistance = 12.0f;
     private float _cruiseSpeed = 18.0f;
     private float _maximumSpeed = 32.0f;
@@ -28,14 +32,37 @@ public sealed class TeamCar : Script
     private bool _respawnWhenLost = true;
     private float _lostDistance = 180.0f;
     private int _stuckMilliseconds = 8000;
+    private float _supportRange = 4.5f;
+    private float _cyclingSupportRange = 20.0f;
+    private float _repairRange = 8.0f;
+    private int _supplyCooldownMilliseconds = 10000;
+    private int _waterHealth = 5;
+    private int _firstAidHealth = 50;
+    private bool _serviceAnimations = true;
+    private bool _gtBikeVProtection = true;
+    private float _gtBikeVMaximumDistance = 90.0f;
 
     private int _nextRetaskAt;
+    private int _nextRespawnAt;
+    private int _servicePropDeleteAt;
     private int _stuckSince;
     private bool _recovering;
+    private bool _teamCarRequested;
+    private bool _supportMenuOpen;
+    private int _supportMenuIndex;
+    private int _nextSupplyAt;
+
+    private static readonly string[] SupportItems =
+    {
+        "Water bottle",
+        "Energy gel",
+        "First aid",
+        "Repair nearby bicycle"
+    };
 
     public TeamCar()
     {
-        Interval = 100;
+        Interval = 50;
         LoadConfiguration();
         Tick += OnTick;
         KeyDown += OnKeyDown;
@@ -48,11 +75,14 @@ public sealed class TeamCar : Script
         {
             ScriptSettings settings = ScriptSettings.Load(ConfigPath);
             _toggleKey = settings.GetValue("Controls", "ToggleKey", Keys.F10);
+            _supportKey = settings.GetValue("Controls", "SupportKey", Keys.E);
             _vehicleModel = settings.GetValue("Vehicle", "Model", "stratum");
             _driverModel = settings.GetValue("Vehicle", "DriverModel", "s_m_m_autoshop_01");
             _primaryColour = settings.GetValue("Vehicle", "PrimaryColour", 3);
             _secondaryColour = settings.GetValue("Vehicle", "SecondaryColour", 111);
             _plate = settings.GetValue("Vehicle", "Plate", "TEAM CAR");
+            _surfboardRoofExtra = settings.GetValue("Vehicle", "SurfboardRoofExtra", 1);
+            _bicycleRoofExtra = settings.GetValue("Vehicle", "BicycleRoofExtra", 2);
             _followDistance = Math.Max(6.0f, settings.GetValue("Following", "FollowDistance", 12.0f));
             _cruiseSpeed = Math.Max(4.0f, settings.GetValue("Following", "CruiseSpeed", 18.0f));
             _maximumSpeed = Math.Max(_cruiseSpeed, settings.GetValue("Following", "MaximumSpeed", 32.0f));
@@ -62,6 +92,19 @@ public sealed class TeamCar : Script
             _respawnWhenLost = settings.GetValue("Recovery", "RespawnWhenLost", true);
             _lostDistance = Math.Max(60.0f, settings.GetValue("Recovery", "LostDistance", 180.0f));
             _stuckMilliseconds = Math.Max(3000, settings.GetValue("Recovery", "StuckSeconds", 8)) * 1000;
+            _supportRange = Math.Max(2.0f, settings.GetValue("Support", "InteractionRange", 4.5f));
+            _cyclingSupportRange =
+                Math.Max(_supportRange, settings.GetValue("Support", "CyclingInteractionRange", 20.0f));
+            _repairRange = Math.Max(_supportRange, settings.GetValue("Support", "BicycleRepairRange", 8.0f));
+            _supplyCooldownMilliseconds =
+                Math.Max(0, settings.GetValue("Support", "SupplyCooldownSeconds", 10)) * 1000;
+            _waterHealth = Math.Max(0, settings.GetValue("Support", "WaterHealth", 5));
+            _firstAidHealth = Math.Max(1, settings.GetValue("Support", "FirstAidHealth", 50));
+            _serviceAnimations = settings.GetValue("Support", "EnableAnimations", true);
+            _gtBikeVProtection = settings.GetValue("Compatibility", "GTBikeVProtection", true);
+            _gtBikeVMaximumDistance = Math.Max(
+                40.0f,
+                Math.Min(95.0f, settings.GetValue("Compatibility", "GTBikeVMaximumDistance", 90.0f)));
         }
         catch (Exception exception)
         {
@@ -71,25 +114,46 @@ public sealed class TeamCar : Script
 
     private void OnKeyDown(object sender, KeyEventArgs e)
     {
+        if (_supportMenuOpen)
+        {
+            HandleSupportMenuKey(e.KeyCode);
+            return;
+        }
+
+        if (e.KeyCode == _supportKey && e.Modifiers == Keys.None && CanUseSupportCar())
+        {
+            OpenSupportMenu();
+            return;
+        }
+
         if (e.KeyCode != _toggleKey || e.Modifiers != Keys.None)
         {
             return;
         }
 
-        if (Exists(_car))
+        if (_teamCarRequested)
         {
+            _teamCarRequested = false;
             DismissTeamCar(true);
         }
         else
         {
+            _teamCarRequested = true;
             SpawnTeamCar(false);
         }
     }
 
     private void OnTick(object sender, EventArgs e)
     {
+        UpdateServiceProp();
+
         if (!Exists(_car))
         {
+            if (_teamCarRequested && Game.GameTime >= _nextRespawnAt)
+            {
+                DismissTeamCar(false);
+                SpawnTeamCar(true);
+            }
             return;
         }
 
@@ -112,24 +176,365 @@ public sealed class TeamCar : Script
             }
             else
             {
+                _teamCarRequested = false;
                 DismissTeamCar(false);
             }
             return;
         }
 
         float distance = _car.Position.DistanceTo(player.Position);
-        if (_respawnWhenLost && distance > _lostDistance)
+        UpdateSupportInteraction(player, distance);
+
+        float recoveryDistance = _gtBikeVProtection
+            ? Math.Min(_lostDistance, _gtBikeVMaximumDistance)
+            : _lostDistance;
+        if (_respawnWhenLost && distance > recoveryDistance)
         {
             ReplaceTeamCar("Support car returned");
             return;
         }
 
-        UpdateStuckState(distance);
+        if (_supportMenuOpen && !IsCycling(player))
+        {
+            return;
+        }
 
+        UpdateStuckState(distance);
         if (Game.GameTime >= _nextRetaskAt)
         {
             AssignFollowTask();
         }
+    }
+
+    private void UpdateSupportInteraction(Ped player, float distance)
+    {
+        bool cycling = IsCycling(player);
+        float activeRange = cycling ? _cyclingSupportRange : _supportRange;
+
+        if (_supportMenuOpen)
+        {
+            if (distance > activeRange + 2.0f || (player.IsInVehicle() && !cycling))
+            {
+                CloseSupportMenu();
+                return;
+            }
+
+            if (!cycling)
+            {
+                Function.Call(Hash.SET_VEHICLE_HANDBRAKE, _car.Handle, true);
+            }
+            GTA.UI.Screen.ShowSubtitle(BuildSupportMenu(), 100);
+            return;
+        }
+
+        if (distance <= activeRange && (!player.IsInVehicle() || cycling))
+        {
+            string mode = cycling ? "rolling team car support" : "team car support";
+            GTA.UI.Screen.ShowHelpTextThisFrame("Press ~INPUT_CONTEXT~ for " + mode + ".");
+        }
+    }
+
+    private bool CanUseSupportCar()
+    {
+        Ped player = Game.Player.Character;
+        bool cycling = IsCycling(player);
+        return Exists(_car)
+            && Exists(_driver)
+            && Exists(player)
+            && (!player.IsInVehicle() || cycling)
+            && player.Position.DistanceTo(_car.Position)
+                <= (cycling ? _cyclingSupportRange : _supportRange);
+    }
+
+    private void OpenSupportMenu()
+    {
+        _supportMenuOpen = true;
+        _supportMenuIndex = 0;
+        if (!IsCycling(Game.Player.Character))
+        {
+            Function.Call(Hash.SET_VEHICLE_HANDBRAKE, _car.Handle, true);
+        }
+    }
+
+    private void CloseSupportMenu()
+    {
+        _supportMenuOpen = false;
+        if (Exists(_car))
+        {
+            Function.Call(Hash.SET_VEHICLE_HANDBRAKE, _car.Handle, false);
+        }
+
+        _nextRetaskAt = 0;
+    }
+
+    private void HandleSupportMenuKey(Keys key)
+    {
+        if (key == Keys.Up)
+        {
+            _supportMenuIndex =
+                (_supportMenuIndex + SupportItems.Length - 1) % SupportItems.Length;
+        }
+        else if (key == Keys.Down)
+        {
+            _supportMenuIndex = (_supportMenuIndex + 1) % SupportItems.Length;
+        }
+        else if (key == Keys.Enter)
+        {
+            UseSelectedSupportItem();
+        }
+        else if (key == Keys.Back || key == Keys.Escape || key == _supportKey)
+        {
+            CloseSupportMenu();
+        }
+    }
+
+    private string BuildSupportMenu()
+    {
+        bool cycling = IsCycling(Game.Player.Character);
+        string menu = "~b~TEAM CAR SUPPORT~s~";
+        for (int index = 0; index < SupportItems.Length; index++)
+        {
+            string marker = index == _supportMenuIndex ? "~y~> " : "~s~  ";
+            string restriction = cycling && index >= 2 ? " ~c~(stop first)~s~" : "";
+            menu += "\n" + marker + SupportItems[index] + restriction + "~s~";
+        }
+        return menu + "\n~c~Up/Down: choose   Enter: take   Back: close~s~";
+    }
+
+    private void UseSelectedSupportItem()
+    {
+        if (Game.GameTime < _nextSupplyAt)
+        {
+            int seconds = Math.Max(1, (_nextSupplyAt - Game.GameTime + 999) / 1000);
+            Notification.Show("~b~Team Car:~s~ supplies ready in " + seconds + "s.");
+            return;
+        }
+
+        Ped player = Game.Player.Character;
+        if (!Exists(player))
+        {
+            return;
+        }
+
+        if (IsCycling(player) && _supportMenuIndex >= 2)
+        {
+            Notification.Show("~b~Team Car:~s~ stop and dismount for this service.");
+            return;
+        }
+
+        bool supplied = true;
+        switch (_supportMenuIndex)
+        {
+            case 0:
+                CreateServiceProp(
+                    player,
+                    "prop_ld_flow_bottle",
+                    Bone.SkelLeftHand,
+                    new Vector3(0.122f, -0.038f, 0.033f),
+                    new Vector3(-103.2f, -68.1f, 2.8f),
+                    2500);
+                PlayServiceAnimation(player, "mp_player_intdrink", "loop_bottle", 2500, 48);
+                Function.Call(Hash.RESTORE_PLAYER_STAMINA, Game.Player.Handle, 1.0f);
+                player.Health = Math.Min(player.MaxHealth, player.Health + _waterHealth);
+                Notification.Show("~b~Team Car:~s~ water bottle received. Stamina restored.");
+                break;
+            case 1:
+                CreateServiceProp(
+                    player,
+                    "prop_choc_ego",
+                    Bone.PHLeftHand,
+                    new Vector3(0.0f, 0.0f, 0.0f),
+                    Vector3.Zero,
+                    2200);
+                PlayServiceAnimation(
+                    player,
+                    "mp_player_inteat@burger",
+                    "mp_player_int_eat_burger",
+                    2200,
+                    48);
+                Function.Call(Hash.RESTORE_PLAYER_STAMINA, Game.Player.Handle, 1.0f);
+                Notification.Show("~b~Team Car:~s~ energy gel received. Stamina restored.");
+                break;
+            case 2:
+                CreateServiceProp(
+                    player,
+                    "prop_ld_health_pack",
+                    Bone.PHLeftHand,
+                    new Vector3(0.10f, 0.02f, -0.02f),
+                    new Vector3(0.0f, 90.0f, 0.0f),
+                    3000);
+                PlayServiceAnimation(
+                    player,
+                    "amb@medic@standing@tendtodead@idle_a",
+                    "idle_a",
+                    3000,
+                    1);
+                player.Health = Math.Min(player.MaxHealth, player.Health + _firstAidHealth);
+                Notification.Show("~b~Team Car:~s~ first aid applied.");
+                break;
+            case 3:
+                supplied = RepairNearestBicycle(player);
+                break;
+        }
+
+        if (supplied)
+        {
+            _nextSupplyAt = Game.GameTime + _supplyCooldownMilliseconds;
+            CloseSupportMenu();
+        }
+    }
+
+    private bool RepairNearestBicycle(Ped player)
+    {
+        Vehicle nearest = null;
+        float nearestDistance = _repairRange + 1.0f;
+        foreach (Vehicle vehicle in World.GetAllVehicles())
+        {
+            if (!Exists(vehicle) || vehicle.Handle == _car.Handle)
+            {
+                continue;
+            }
+
+            if (Function.Call<int>(Hash.GET_VEHICLE_CLASS, vehicle.Handle) != 13)
+            {
+                continue;
+            }
+
+            float distance = vehicle.Position.DistanceTo(player.Position);
+            if (distance <= _repairRange && distance < nearestDistance)
+            {
+                nearest = vehicle;
+                nearestDistance = distance;
+            }
+        }
+
+        if (!Exists(nearest))
+        {
+            Notification.Show("~b~Team Car:~s~ bring your bicycle within "
+                + _repairRange.ToString("0.#", CultureInfo.InvariantCulture) + "m.");
+            return false;
+        }
+
+        Function.Call(Hash.SET_VEHICLE_FIXED, nearest.Handle);
+        Function.Call(Hash.SET_VEHICLE_DEFORMATION_FIXED, nearest.Handle);
+        Function.Call(Hash.SET_VEHICLE_DIRT_LEVEL, nearest.Handle, 0.0f);
+        CreateServiceProp(
+            player,
+            "prop_tool_wrench",
+            Bone.PHRightHand,
+            new Vector3(0.11f, 0.02f, 0.0f),
+            new Vector3(0.0f, 90.0f, 0.0f),
+            3500);
+        PlayServiceAnimation(player, "mini@repair", "fixing_a_ped", 3500, 1);
+        Notification.Show("~b~Team Car:~s~ bicycle repaired and cleaned.");
+        return true;
+    }
+
+    private void PlayServiceAnimation(
+        Ped player,
+        string dictionary,
+        string animation,
+        int duration,
+        int flags)
+    {
+        if (!_serviceAnimations || !Exists(player))
+        {
+            return;
+        }
+
+        Function.Call(Hash.REQUEST_ANIM_DICT, dictionary);
+        int timeout = Game.GameTime + 1000;
+        while (!Function.Call<bool>(Hash.HAS_ANIM_DICT_LOADED, dictionary)
+            && Game.GameTime < timeout)
+        {
+            Wait(10);
+        }
+
+        if (!Function.Call<bool>(Hash.HAS_ANIM_DICT_LOADED, dictionary))
+        {
+            return;
+        }
+
+        Function.Call(
+            Hash.TASK_PLAY_ANIM,
+            player.Handle,
+            dictionary,
+            animation,
+            4.0f,
+            -4.0f,
+            duration,
+            flags,
+            0.0f,
+            false,
+            false,
+            false);
+    }
+
+    private void CreateServiceProp(
+        Ped player,
+        string modelName,
+        Bone handBone,
+        Vector3 handOffset,
+        Vector3 handRotation,
+        int duration)
+    {
+        CleanupServiceProp();
+        if (!_serviceAnimations || !Exists(player))
+        {
+            return;
+        }
+
+        Model model = new Model(modelName);
+        if (!model.IsInCdImage || !model.IsValid)
+        {
+            return;
+        }
+
+        model.Request(500);
+        if (!model.IsLoaded)
+        {
+            model.MarkAsNoLongerNeeded();
+            return;
+        }
+
+        _serviceProp = World.CreateProp(model, player.Position, false, false);
+        model.MarkAsNoLongerNeeded();
+        if (!Exists(_serviceProp))
+        {
+            _serviceProp = null;
+            return;
+        }
+
+        _serviceProp.IsPersistent = true;
+        _serviceProp.AttachTo(player.Bones[handBone], handOffset, handRotation);
+        _servicePropDeleteAt = Game.GameTime + duration;
+    }
+
+    private void UpdateServiceProp()
+    {
+        if (Exists(_serviceProp) && Game.GameTime >= _servicePropDeleteAt)
+        {
+            CleanupServiceProp();
+        }
+    }
+
+    private void CleanupServiceProp()
+    {
+        if (Exists(_serviceProp))
+        {
+            _serviceProp.Delete();
+        }
+
+        _serviceProp = null;
+        _servicePropDeleteAt = 0;
+    }
+
+    private static bool IsCycling(Ped player)
+    {
+        return Exists(player)
+            && player.IsInVehicle()
+            && Exists(player.CurrentVehicle)
+            && Function.Call<int>(Hash.GET_VEHICLE_CLASS, player.CurrentVehicle.Handle) == 13;
     }
 
     private void ProtectFromTrafficConverters()
@@ -138,6 +543,11 @@ public sealed class TeamCar : Script
         {
             _car.IsPersistent = true;
             Function.Call(Hash.SET_ENTITY_AS_MISSION_ENTITY, _car.Handle, true, true);
+            if (_gtBikeVProtection)
+            {
+                _car.IsInvincible = true;
+            }
+            ApplyBicycleRoofVariant();
         }
 
         if (Exists(_driver))
@@ -145,11 +555,16 @@ public sealed class TeamCar : Script
             _driver.IsPersistent = true;
             _driver.BlockPermanentEvents = true;
             Function.Call(Hash.SET_ENTITY_AS_MISSION_ENTITY, _driver.Handle, true, true);
+            if (_gtBikeVProtection)
+            {
+                _driver.IsInvincible = true;
+            }
         }
     }
 
     private void SpawnTeamCar(bool silent)
     {
+        _nextRespawnAt = Game.GameTime + 3000;
         Ped player = Game.Player.Character;
         if (!Exists(player))
         {
@@ -192,11 +607,13 @@ public sealed class TeamCar : Script
         }
 
         _car.IsPersistent = true;
+        _car.IsInvincible = _gtBikeVProtection;
         _car.PlaceOnGround();
         _car.IsEngineRunning = true;
         _car.CanTiresBurst = false;
         Function.Call(Hash.SET_VEHICLE_COLOURS, _car.Handle, _primaryColour, _secondaryColour);
         Function.Call(Hash.SET_VEHICLE_NUMBER_PLATE_TEXT, _car.Handle, TrimPlate(_plate));
+        ApplyBicycleRoofVariant();
 
         _driver = World.CreatePed(driverModel, _car.Position);
         if (!Exists(_driver))
@@ -210,6 +627,7 @@ public sealed class TeamCar : Script
         }
 
         _driver.IsPersistent = true;
+        _driver.IsInvincible = _gtBikeVProtection;
         _driver.BlockPermanentEvents = true;
         _driver.SetIntoVehicle(_car, VehicleSeat.Driver);
         Function.Call(Hash.SET_DRIVER_ABILITY, _driver.Handle, 1.0f);
@@ -245,6 +663,25 @@ public sealed class TeamCar : Script
             roadside = World.GetNextPositionOnStreet(player.Position, true);
         }
         return roadside;
+    }
+
+    private void ApplyBicycleRoofVariant()
+    {
+        if (!Exists(_car))
+        {
+            return;
+        }
+
+        if (Function.Call<bool>(Hash.DOES_EXTRA_EXIST, _car.Handle, _surfboardRoofExtra))
+        {
+            // The final native argument means "disable", so true removes it.
+            Function.Call(Hash.SET_VEHICLE_EXTRA, _car.Handle, _surfboardRoofExtra, true);
+        }
+
+        if (Function.Call<bool>(Hash.DOES_EXTRA_EXIST, _car.Handle, _bicycleRoofExtra))
+        {
+            Function.Call(Hash.SET_VEHICLE_EXTRA, _car.Handle, _bicycleRoofExtra, false);
+        }
     }
 
     private void AssignFollowTask()
@@ -312,6 +749,7 @@ public sealed class TeamCar : Script
 
     private void DismissTeamCar(bool notify)
     {
+        _supportMenuOpen = false;
         if (Exists(_blip))
         {
             _blip.Delete();
@@ -342,6 +780,8 @@ public sealed class TeamCar : Script
 
     private void OnAborted(object sender, EventArgs e)
     {
+        _teamCarRequested = false;
+        CleanupServiceProp();
         DismissTeamCar(false);
     }
 

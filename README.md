@@ -7,10 +7,15 @@ support car. The car follows you on foot, on a bicycle, or in another vehicle.
 
 - `F10` summons or dismisses the team car.
 - Uses GTA V's stock **Zirconium Stratum** (`stratum`).
+- Forces the custom Stratum's bicycle roof load instead of the empty or surfboard
+  variants.
 - A support driver keeps a configurable gap and adapts to your speed.
 - The car slows down near you, avoids aggressive driving, and recovers if stuck.
 - If it becomes lost or destroyed, it can automatically return.
 - Protected from Cycletopia's ambient-traffic-to-bicycle conversion.
+- Protected from GTBikeV's off-screen car replacement and defensive explosions.
+- Walk up to the car and press `E` for water, an energy gel, first aid, or a
+  nearby bicycle repair.
 - All important keys, distances, colours, and behaviour are configurable.
 
 ## Requirements
@@ -32,6 +37,35 @@ version. Do not use this in GTA Online.
    - `TeamCar.ini`
 4. Start story mode and press `F10`.
 
+## Team car support
+
+Walk up to the stopped team car, or ride within the configured rolling-support
+range, and press `E`. Use the arrow keys and Enter to choose a service:
+
+- **Water bottle:** restores stamina and a small amount of health; available
+  while cycling with an upper-body drinking animation.
+- **Energy gel:** restores stamina; available while cycling with an upper-body
+  eating animation.
+- **First aid:** restores health.
+- **Repair nearby bicycle:** repairs and cleans a bicycle within the configured
+  service range.
+
+Press Backspace, Escape, or `E` again to close the menu. Supplies use a short
+configurable cooldown; failed bicycle repair requests do not consume it. Each
+successful service plays a matching drinking, eating, medical, or repair
+animation with a temporary bottle, wrapped snack, first-aid pack, or wrench in the
+character's hand. Set `EnableAnimations=false` if another gameplay mod conflicts
+with them. First aid and bicycle repairs require stopping and dismounting because
+their full-body animations are not safe while riding.
+
+## GTBikeV compatibility
+
+GTBikeV can replace off-screen traffic beyond 100 metres and, at higher defensive
+settings, explode nearby non-bicycle vehicles. With `GTBikeVProtection=true`, the
+team car and driver are invincible, the car relocates before crossing GTBikeV's
+replacement boundary, and a requested team car automatically respawns if another
+script deletes it. `GTBikeVMaximumDistance` is therefore capped at 95 metres.
+
 ScriptHookVDotNet compiles `.3.cs` scripts when loading them, so no separate build
 step is required. Open its console with `F4` and use `Reload()` after editing the
 configuration.
@@ -52,6 +86,11 @@ than assuming a fixed path.
 If the download also contains `stratum.yft` and `stratum_hi.yft`, install those
 matching model files alongside the textures. Do not rename unrelated `.ytd` files
 to these names.
+
+The custom replacement's roof loads are vehicle extras. By default the mod
+disables extra `1` (surfboard) and enables extra `2` (bicycles) every time the car
+spawns and while it remains active. If a different release of the model swaps
+those IDs, exchange `SurfboardRoofExtra` and `BicycleRoofExtra` in `TeamCar.ini`.
 
 ## Configuration
 
